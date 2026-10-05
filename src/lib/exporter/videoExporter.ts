@@ -13,6 +13,7 @@ import { FrameRenderer } from "./frameRenderer";
 import { VideoMuxer } from "./muxer";
 import { StreamingVideoDecoder } from "./streamingDecoder";
 import type { ExportConfig, ExportProgress, ExportResult } from "./types";
+import { offsetToFrames, WebcamFrameFeed } from "./webcamFrameFeed";
 
 const ENCODER_STALL_TIMEOUT_MS = 15_000;
 const ENCODER_FLUSH_TIMEOUT_MS = 20_000;
@@ -104,6 +105,7 @@ export class VideoExporter {
 		encoderPreference: HardwareAcceleration,
 	): Promise<ExportResult> {
 		let webcamFrameQueue: AsyncVideoFrameQueue | null = null;
+		let webcamFeed: WebcamFrameFeed<VideoFrame> | null = null;
 		let stopWebcamDecode = false;
 		let webcamDecodeError: Error | null = null;
 		let webcamDecodePromise: Promise<void> | null = null;
@@ -213,18 +215,15 @@ export class VideoExporter {
 						})()
 					: null;
 
-			// The webcam queue is consumed one frame per output frame, so a lagging
-			// webcam is realigned by discarding leading frames rather than seeking.
-			const webcamOffsetMs = this.config.webcamOffsetMs ?? 0;
-			if (webcamFrameQueue && webcamOffsetMs > 0) {
-				const framesToDrop = Math.round((webcamOffsetMs / 1000) * this.config.frameRate);
-				for (let dropped = 0; dropped < framesToDrop && !this.cancelled; dropped += 1) {
-					const staleFrame = await webcamFrameQueue.dequeue();
-					if (!staleFrame) {
-						break;
-					}
-					staleFrame.close();
-				}
+			// The webcam queue is consumed one frame per output frame, so the offset
+			// is applied in whole output frames: drop leading frames when the webcam
+			// lags, repeat the first frame when it leads.
+			if (webcamFrameQueue) {
+				webcamFeed = new WebcamFrameFeed<VideoFrame>(
+					webcamFrameQueue,
+					offsetToFrames(this.config.webcamOffsetMs ?? 0, this.config.frameRate),
+					() => this.cancelled,
+				);
 			}
 
 			await streamingDecoder.decodeAll(
@@ -243,7 +242,8 @@ export class VideoExporter {
 						}
 
 						const timestamp = frameIndex * frameDuration;
-						webcamFrame = webcamFrameQueue ? await webcamFrameQueue.dequeue() : null;
+						// The feed owns this frame's lifetime; do not close it here.
+						webcamFrame = webcamFeed ? await webcamFeed.next() : null;
 						if (this.cancelled) {
 							return;
 						}
@@ -309,7 +309,6 @@ export class VideoExporter {
 						});
 					} finally {
 						videoFrame.close();
-						webcamFrame?.close();
 					}
 				},
 			);
@@ -323,6 +322,7 @@ export class VideoExporter {
 			}
 
 			stopWebcamDecode = true;
+			webcamFeed?.destroy();
 			webcamFrameQueue?.destroy();
 			webcamDecoder?.cancel();
 			await webcamDecodePromise;
@@ -371,6 +371,7 @@ export class VideoExporter {
 			return { success: true, blob };
 		} finally {
 			stopWebcamDecode = true;
+			webcamFeed?.destroy();
 			webcamFrameQueue?.destroy();
 			webcamDecoder?.cancel();
 			if (webcamDecodePromise) {

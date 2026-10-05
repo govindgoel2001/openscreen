@@ -1,5 +1,9 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { RecordingSession, StoreRecordedSessionInput } from "../src/lib/recordingSession";
+import type {
+	FinalizeLiveSessionInput,
+	RecordingSession,
+	StoreRecordedSessionInput,
+} from "../src/lib/recordingSession";
 
 contextBridge.exposeInMainWorld("electronAPI", {
 	hudOverlayHide: () => {
@@ -42,6 +46,18 @@ contextBridge.exposeInMainWorld("electronAPI", {
 	},
 	storeRecordedSession: (payload: StoreRecordedSessionInput) => {
 		return ipcRenderer.invoke("store-recorded-session", payload);
+	},
+	openLiveRecording: (fileName: string) => {
+		return ipcRenderer.invoke("open-live-recording", fileName);
+	},
+	appendLiveRecording: (fileName: string, data: ArrayBuffer) => {
+		return ipcRenderer.invoke("append-live-recording", fileName, data);
+	},
+	finalizeLiveSession: (payload: FinalizeLiveSessionInput) => {
+		return ipcRenderer.invoke("finalize-live-session", payload);
+	},
+	discardLiveRecording: (fileName: string) => {
+		return ipcRenderer.invoke("discard-live-recording", fileName);
 	},
 
 	getRecordedVideoPath: () => {

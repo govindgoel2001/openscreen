@@ -1,4 +1,13 @@
 {
+	"newRecording": {
+		"title": "Volver al grabador",
+		"recordAgain": "Grabar de nuevo",
+		"exportContinues": "La exportación seguirá procesándose en segundo plano.",
+		"failed": "No se pudo abrir el grabador. Inténtalo de nuevo.",
+		"description": "Tu sesión actual se ha guardado.",
+		"cancel": "Cancelar",
+		"confirm": "Confirmar"
+	},
 	"errors": {
 		"noVideoLoaded": "No hay video cargado",
 		"videoNotReady": "El video no está listo",
@@ -30,6 +39,10 @@
 		"systemAudioUnavailable": "Audio del sistema no disponible. Grabando sin audio del sistema.",
 		"microphoneDenied": "Acceso al micrófono denegado. La grabación continuará sin audio.",
 		"cameraDenied": "Acceso a la cámara denegado. La grabación continuará sin cámara web.",
-		"permissionDenied": "Permiso de grabación denegado. Por favor permite la grabación de pantalla."
+		"permissionDenied": "Permiso de grabación denegado. Por favor permite la grabación de pantalla.",
+		"cameraModeUnavailable": "{{accelerators}} en uso por otra aplicación. Aún puedes ajustar los modos de cámara en el editor.",
+		"webcamNoImage": "La cámara se abrió pero envía una imagen en blanco. Comprueba que la app GoPro Webcam muestre una vista previa en vivo y reinicia esta grabación.",
+		"webcamFrozen": "La cámara está enviando una pantalla fija de GoPro, no vídeo en directo. En la cámara, ve a Conexiones > Conexión USB y elige GoPro Connect, comprueba que el cortafuegos no bloquee el dispositivo de red USB de GoPro y reinicia la app GoPro Webcam.",
+		"webcamBelowTarget": "La cámara está enviando {{width}}x{{height}}, por debajo de los {{targetWidth}}x{{targetHeight}} solicitados. Comprueba que esté seleccionada la cámara correcta."
 	}
 }

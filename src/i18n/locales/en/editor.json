@@ -1,6 +1,9 @@
 {
 	"newRecording": {
 		"title": "Return to Recorder",
+		"recordAgain": "Record again",
+		"exportContinues": "Your export will keep processing in the background.",
+		"failed": "Could not open the recorder. Please try again.",
 		"description": "Your current session has been saved.",
 		"cancel": "Cancel",
 		"confirm": "Confirm"
@@ -38,6 +41,8 @@
 		"cameraDenied": "Camera access denied. Recording will continue without webcam.",
 		"permissionDenied": "Recording permission denied. Please allow screen recording.",
 		"cameraModeUnavailable": "{{accelerators}} in use by another app. You can still set camera modes in the editor.",
-		"webcamNoImage": "Your camera opened but is sending a blank image. Check the GoPro Webcam app shows a live preview, then restart this recording."
+		"webcamNoImage": "Your camera opened but is sending a blank image. Check the GoPro Webcam app shows a live preview, then restart this recording.",
+		"webcamFrozen": "Your camera is sending a still GoPro screen, not live video. On the camera set Connections > USB Connection to GoPro Connect, check your firewall is not blocking the GoPro USB network device, then restart the GoPro Webcam app.",
+		"webcamBelowTarget": "Camera is sending {{width}}x{{height}}, below the {{targetWidth}}x{{targetHeight}} requested. Check that the right camera is selected."
 	}
 }

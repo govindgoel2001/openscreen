@@ -49,6 +49,38 @@ function buildAV1CodecString(description?: BufferSource): string {
 	return `av01.${profile}.${levelStr}${tierChar}.${bitdepthStr}`;
 }
 
+/**
+ * Build a full WebCodecs-compatible AVC codec string from the AVCDecoderConfigurationRecord.
+ * Recording now prefers H.264, and web-demuxer sometimes reports a bare "h264"
+ * for it in a WebM container. WebCodecs needs the parametrized form
+ * (e.g. "avc1.640028"), so read the profile, constraint and level bytes back out.
+ *
+ * @see https://www.iso.org/standard/83336.html (AVCDecoderConfigurationRecord)
+ */
+export function buildAVCCodecString(description?: BufferSource): string {
+	// High profile, level 4.0. Chromium decodes this config for any 1080p stream
+	// MediaRecorder produces, so it is a safe stand-in when the record is missing.
+	const fallback = "avc1.640028";
+
+	if (!description) return fallback;
+
+	const bytes =
+		description instanceof ArrayBuffer
+			? new Uint8Array(description)
+			: new Uint8Array(description.buffer, description.byteOffset, description.byteLength);
+
+	// AVCDecoderConfigurationRecord layout:
+	//   Byte 0: configurationVersion (always 1)
+	//   Byte 1: AVCProfileIndication
+	//   Byte 2: profile_compatibility
+	//   Byte 3: AVCLevelIndication
+	if (bytes.length < 4) return fallback;
+	if (bytes[0] !== 1) return fallback;
+
+	const hex = (value: number) => value.toString(16).padStart(2, "0");
+	return `avc1.${hex(bytes[1])}${hex(bytes[2])}${hex(bytes[3])}`;
+}
+
 export interface DecodedVideoInfo {
 	width: number;
 	height: number;
@@ -235,6 +267,13 @@ export class StreamingVideoDecoder {
 		// full parametrized form (e.g. "av01.0.05M.08").
 		if (/^av01$/i.test(decoderConfig.codec)) {
 			decoderConfig.codec = buildAV1CodecString(
+				decoderConfig.description as BufferSource | undefined,
+			);
+		}
+
+		// Same problem as AV1: a bare codec id needs the parametrized form.
+		if (/^(h264|avc|avc1)$/i.test(decoderConfig.codec)) {
+			decoderConfig.codec = buildAVCCodecString(
 				decoderConfig.description as BufferSource | undefined,
 			);
 		}

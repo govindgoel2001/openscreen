@@ -13,7 +13,7 @@ import {
 	Tray,
 } from "electron";
 import { mainT, setMainLocale } from "./i18n";
-import { registerIpcHandlers } from "./ipc/handlers";
+import { bindEditorSession, registerIpcHandlers } from "./ipc/handlers";
 import { createEditorWindow, createHudOverlayWindow, createSourceSelectorWindow } from "./windows";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -66,6 +66,11 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL
 
 // Window references
 let mainWindow: BrowserWindow | null = null;
+let recorderWindow: BrowserWindow | null = null;
+const editorWindows = new Set<BrowserWindow>();
+const editorHasUnsavedChanges = new Map<number, boolean>();
+const forceClosingEditors = new Set<number>();
+let isRecording = false;
 let sourceSelectorWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let selectedSourceName = "";
@@ -75,7 +80,26 @@ const defaultTrayIcon = getTrayIcon("openscreen.png");
 const recordingTrayIcon = getTrayIcon("rec-button.png");
 
 function createWindow() {
-	mainWindow = createHudOverlayWindow();
+	const win = createHudOverlayWindow();
+	recorderWindow = win;
+	mainWindow = win;
+	win.on("closed", () => {
+		if (recorderWindow === win) recorderWindow = null;
+		if (mainWindow === win) mainWindow = getAvailableWindow();
+	});
+}
+
+function getAvailableWindow(): BrowserWindow | null {
+	return [...editorWindows].reverse().find((win) => !win.isDestroyed()) ?? recorderWindow;
+}
+
+function showRecorderWindow(editorToMinimize?: BrowserWindow | null) {
+	if (!recorderWindow || recorderWindow.isDestroyed()) createWindow();
+	if (editorToMinimize && editorWindows.has(editorToMinimize) && !editorToMinimize.isDestroyed()) {
+		editorToMinimize.minimize();
+	}
+	mainWindow = recorderWindow;
+	showMainWindow();
 }
 
 function showMainWindow() {
@@ -101,8 +125,7 @@ function sendEditorMenuAction(
 	let targetWindow = BrowserWindow.getFocusedWindow() ?? mainWindow;
 
 	if (!targetWindow || targetWindow.isDestroyed() || !isEditorWindow(targetWindow)) {
-		createEditorWindowWrapper();
-		targetWindow = mainWindow;
+		targetWindow = createEditorWindowWrapper();
 		if (!targetWindow || targetWindow.isDestroyed()) return;
 
 		targetWindow.webContents.once("did-finish-load", () => {
@@ -140,6 +163,11 @@ function setupApplicationMenu() {
 		{
 			label: mainT("common", "actions.file") || "File",
 			submenu: [
+				{
+					label: mainT("editor", "newRecording.recordAgain"),
+					accelerator: "CmdOrCtrl+N",
+					click: () => showRecorderWindow(BrowserWindow.getFocusedWindow()),
+				},
 				{
 					label: mainT("dialogs", "unsavedChanges.loadProject") || "Load Project…",
 					accelerator: "CmdOrCtrl+O",
@@ -225,13 +253,17 @@ function updateTrayMenu(recording: boolean = false) {
 				{
 					label: mainT("common", "actions.stopRecording") || "Stop Recording",
 					click: () => {
-						if (mainWindow && !mainWindow.isDestroyed()) {
-							mainWindow.webContents.send("stop-recording-from-tray");
+						if (recorderWindow && !recorderWindow.isDestroyed()) {
+							recorderWindow.webContents.send("stop-recording-from-tray");
 						}
 					},
 				},
 			]
 		: [
+				{
+					label: mainT("editor", "newRecording.recordAgain"),
+					click: () => showRecorderWindow(),
+				},
 				{
 					label: mainT("common", "actions.open") || "Open",
 					click: () => {
@@ -250,44 +282,60 @@ function updateTrayMenu(recording: boolean = false) {
 	tray.setContextMenu(Menu.buildFromTemplate(menuTemplate));
 }
 
-let editorHasUnsavedChanges = false;
-let isForceClosing = false;
+ipcMain.on("set-has-unsaved-changes", (event, hasChanges: boolean) => {
+	editorHasUnsavedChanges.set(event.sender.id, hasChanges);
+});
 
-ipcMain.on("set-has-unsaved-changes", (_, hasChanges: boolean) => {
-	editorHasUnsavedChanges = hasChanges;
+ipcMain.on("save-before-close-done", (event, shouldClose: boolean) => {
+	if (shouldClose) forceCloseEditorWindow(BrowserWindow.fromWebContents(event.sender));
 });
 
 function forceCloseEditorWindow(windowToClose: BrowserWindow | null) {
 	if (!windowToClose || windowToClose.isDestroyed()) return;
 
-	isForceClosing = true;
+	const id = windowToClose.webContents.id;
+	forceClosingEditors.add(id);
 	setImmediate(() => {
 		try {
 			if (!windowToClose.isDestroyed()) {
 				windowToClose.close();
 			}
 		} finally {
-			isForceClosing = false;
+			forceClosingEditors.delete(id);
 		}
 	});
 }
 
 function createEditorWindowWrapper() {
-	if (mainWindow) {
-		isForceClosing = true;
-		mainWindow.close();
-		isForceClosing = false;
-		mainWindow = null;
+	// Each editor owns its processing job. Opening the recorder or another
+	// editor must never destroy the renderer that is exporting an earlier take.
+	const editorWindow = createEditorWindow();
+	bindEditorSession(editorWindow.webContents);
+	editorWindows.add(editorWindow);
+	const id = editorWindow.webContents.id;
+	editorHasUnsavedChanges.set(id, false);
+	if (isRecording) {
+		editorWindow.minimize();
+		showRecorderWindow();
+	} else {
+		recorderWindow?.hide();
+		mainWindow = editorWindow;
 	}
-	mainWindow = createEditorWindow();
-	editorHasUnsavedChanges = false;
 
-	mainWindow.on("close", (event) => {
-		if (isForceClosing || !editorHasUnsavedChanges) return;
+	editorWindow.on("focus", () => {
+		mainWindow = editorWindow;
+	});
+	editorWindow.on("closed", () => {
+		editorWindows.delete(editorWindow);
+		editorHasUnsavedChanges.delete(id);
+		if (mainWindow === editorWindow) mainWindow = getAvailableWindow();
+	});
+	editorWindow.on("close", (event) => {
+		if (forceClosingEditors.has(id) || !editorHasUnsavedChanges.get(id)) return;
 
 		event.preventDefault();
 
-		const choice = dialog.showMessageBoxSync(mainWindow!, {
+		const choice = dialog.showMessageBoxSync(editorWindow, {
 			type: "warning",
 			buttons: [
 				mainT("dialogs", "unsavedChanges.saveAndClose"),
@@ -301,22 +349,18 @@ function createEditorWindowWrapper() {
 			detail: mainT("dialogs", "unsavedChanges.detail"),
 		});
 
-		const windowToClose = mainWindow;
-		if (!windowToClose || windowToClose.isDestroyed()) return;
+		if (editorWindow.isDestroyed()) return;
 
 		if (choice === 0) {
 			// Save & Close — tell renderer to save, then close
-			windowToClose.webContents.send("request-save-before-close");
-			ipcMain.once("save-before-close-done", (_, shouldClose: boolean) => {
-				if (!shouldClose) return;
-				forceCloseEditorWindow(windowToClose);
-			});
+			editorWindow.webContents.send("request-save-before-close");
 		} else if (choice === 1) {
 			// Discard & Close
-			forceCloseEditorWindow(windowToClose);
+			forceCloseEditorWindow(editorWindow);
 		}
 		// choice === 2: Cancel — do nothing, window stays open
 	});
+	return editorWindow;
 }
 
 function createSourceSelectorWindowWrapper() {
@@ -369,7 +413,7 @@ app.whenReady().then(async () => {
 	ipcMain.handle("set-locale", (_, locale: string) => {
 		setMainLocale(locale);
 		setupApplicationMenu();
-		updateTrayMenu();
+		updateTrayMenu(isRecording);
 	});
 
 	createTray();
@@ -378,30 +422,20 @@ app.whenReady().then(async () => {
 	// Ensure recordings directory exists
 	await ensureRecordingsDir();
 
-	function switchToHudWrapper() {
-		if (mainWindow) {
-			isForceClosing = true;
-			mainWindow.close();
-			isForceClosing = false;
-			mainWindow = null;
-		}
-		showMainWindow();
-	}
-
 	registerIpcHandlers(
 		createEditorWindowWrapper,
 		createSourceSelectorWindowWrapper,
-		() => mainWindow,
 		() => sourceSelectorWindow,
 		(recording: boolean, sourceName: string) => {
+			isRecording = recording;
 			selectedSourceName = sourceName;
 			if (!tray) createTray();
 			updateTrayMenu(recording);
 			if (!recording) {
-				showMainWindow();
+				showRecorderWindow();
 			}
 		},
-		switchToHudWrapper,
+		showRecorderWindow,
 	);
 	createWindow();
 });

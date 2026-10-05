@@ -10,7 +10,8 @@
 		"pressZoom": "按 Z 添加缩放",
 		"pressTrim": "按 T 添加剪辑",
 		"pressAnnotation": "按 A 添加标注",
-		"pressSpeed": "按 S 添加速度"
+		"pressSpeed": "按 S 添加速度",
+		"pressCamera": "录制时用 F9 / F10 / F11 切换摄像头模式"
 	},
 	"labels": {
 		"pan": "平移",

@@ -1,4 +1,3 @@
-import { fixWebmDuration } from "@fix-webm-duration/fix";
 import type { CameraMarker, CameraMode } from "@/components/video-editor/types";
 import { DEFAULT_CAMERA_MODE } from "@/components/video-editor/types";
 import { checkWebcamStreamHealth } from "@/lib/webcamHealth";
@@ -10,7 +9,13 @@ function isCameraMode(value: string): value is CameraMode {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useScopedT } from "@/contexts/I18nContext";
+import { selectRecordingMimeType } from "@/lib/recordingCodec";
 import { requestCameraAccess } from "@/lib/requestCameraAccess";
+import {
+	loadUserPreferences,
+	saveUserPreferences,
+	type WebcamResolution,
+} from "@/lib/userPreferences";
 
 const TARGET_FRAME_RATE = 60;
 const MIN_FRAME_RATE = 30;
@@ -70,33 +75,58 @@ type UseScreenRecorderReturn = {
 	setSystemAudioEnabled: (enabled: boolean) => void;
 	webcamEnabled: boolean;
 	setWebcamEnabled: (enabled: boolean) => Promise<boolean>;
+	/** What the camera actually negotiated, once a recording has started. */
+	webcamResolution: WebcamResolution | null;
 };
 
 type RecorderHandle = {
 	recorder: MediaRecorder;
-	recordedBlobPromise: Promise<Blob>;
+	fileName: string;
+	/** Resolves once the recorder has stopped and every chunk is on disk: true if anything was written. */
+	writtenPromise: Promise<boolean>;
 };
 
-function createRecorderHandle(stream: MediaStream, options: MediaRecorderOptions): RecorderHandle {
+// Every chunk goes straight to disk as the recorder produces it. Nothing is
+// kept in memory, so a long take can't run the app out of it, and if the app
+// dies mid-take everything up to the last second is already in the file.
+function createRecorderHandle(
+	stream: MediaStream,
+	options: MediaRecorderOptions,
+	fileName: string,
+): RecorderHandle {
+	const api = window.electronAPI;
 	const recorder = new MediaRecorder(stream, options);
-	const chunks: Blob[] = [];
-	const mimeType = options.mimeType || "video/webm";
-	const recordedBlobPromise = new Promise<Blob>((resolve, reject) => {
+	let bytesWritten = 0;
+	let writes: Promise<unknown> = api.openLiveRecording(fileName);
+
+	const writtenPromise = new Promise<boolean>((resolve) => {
 		recorder.ondataavailable = (event: BlobEvent) => {
-			if (event.data && event.data.size > 0) {
-				chunks.push(event.data);
+			const chunk = event.data;
+			if (!chunk || chunk.size === 0) {
+				return;
 			}
+			writes = writes
+				.then(async () => {
+					const result = await api.appendLiveRecording(fileName, await chunk.arrayBuffer());
+					if (result.success) {
+						bytesWritten += chunk.size;
+					} else {
+						console.error("Failed to write recording chunk:", result.error);
+					}
+				})
+				.catch((error) => console.error("Failed to write recording chunk:", error));
 		};
 		recorder.onerror = () => {
-			reject(new Error("Recording failed"));
+			console.error("Recording failed:", fileName);
 		};
 		recorder.onstop = () => {
-			resolve(new Blob(chunks, { type: mimeType }));
+			// The final dataavailable fires before stop, so its write is already queued.
+			void writes.then(() => resolve(bytesWritten > 0));
 		};
 	});
 
 	recorder.start(RECORDER_TIMESLICE_MS);
-	return { recorder, recordedBlobPromise };
+	return { recorder, fileName, writtenPromise };
 }
 
 export function useScreenRecorder(): UseScreenRecorderReturn {
@@ -111,6 +141,9 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 	const [webcamDeviceId, setWebcamDeviceId] = useState<string | undefined>(undefined);
 	const [systemAudioEnabled, setSystemAudioEnabled] = useState(false);
 	const [webcamEnabled, setWebcamEnabledState] = useState(false);
+	const [webcamResolution, setWebcamResolution] = useState<WebcamResolution | null>(
+		() => loadUserPreferences().webcamLastResolution,
+	);
 	const screenRecorder = useRef<RecorderHandle | null>(null);
 	const webcamRecorder = useRef<RecorderHandle | null>(null);
 	const stream = useRef<MediaStream | null>(null);
@@ -132,18 +165,6 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			segmentStartedAt.current === null ? 0 : Date.now() - segmentStartedAt.current;
 		return accumulatedDurationMs.current + segmentDuration;
 	}, []);
-
-	const selectMimeType = () => {
-		const preferred = [
-			"video/webm;codecs=av1",
-			"video/webm;codecs=h264",
-			"video/webm;codecs=vp9",
-			"video/webm;codecs=vp8",
-			"video/webm",
-		];
-
-		return preferred.find((type) => MediaRecorder.isTypeSupported(type)) ?? "video/webm";
-	};
 
 	const computeBitrate = (width: number, height: number) => {
 		const pixels = width * height;
@@ -239,36 +260,28 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 
 			void (async () => {
 				try {
-					const screenBlob = await activeScreenRecorder.recordedBlobPromise;
-					if (discardRecordingId.current === activeRecordingId) {
-						return;
-					}
-					if (screenBlob.size === 0) {
-						return;
-					}
+					const api = window.electronAPI;
+					const screenWritten = await activeScreenRecorder.writtenPromise;
+					const webcamWritten = activeWebcamRecorder
+						? await activeWebcamRecorder.writtenPromise.catch(() => false)
+						: false;
 
-					const fixedScreenBlob = await fixWebmDuration(screenBlob, duration);
-					let fixedWebcamBlob: Blob | null = null;
-					if (activeWebcamRecorder) {
-						const webcamBlob = await activeWebcamRecorder.recordedBlobPromise.catch(() => null);
-						if (webcamBlob && webcamBlob.size > 0) {
-							fixedWebcamBlob = await fixWebmDuration(webcamBlob, duration);
+					const discarded = discardRecordingId.current === activeRecordingId;
+					if (discarded || !screenWritten) {
+						await api.discardLiveRecording(activeScreenRecorder.fileName);
+						if (activeWebcamRecorder) {
+							await api.discardLiveRecording(activeWebcamRecorder.fileName);
 						}
+						return;
+					}
+					if (activeWebcamRecorder && !webcamWritten) {
+						await api.discardLiveRecording(activeWebcamRecorder.fileName);
 					}
 
-					const screenFileName = `${RECORDING_FILE_PREFIX}${activeRecordingId}${VIDEO_FILE_EXTENSION}`;
-					const webcamFileName = `${RECORDING_FILE_PREFIX}${activeRecordingId}${WEBCAM_FILE_SUFFIX}${VIDEO_FILE_EXTENSION}`;
-					const result = await window.electronAPI.storeRecordedSession({
-						screen: {
-							videoData: await fixedScreenBlob.arrayBuffer(),
-							fileName: screenFileName,
-						},
-						webcam: fixedWebcamBlob
-							? {
-									videoData: await fixedWebcamBlob.arrayBuffer(),
-									fileName: webcamFileName,
-								}
-							: undefined,
+					const result = await api.finalizeLiveSession({
+						screenFileName: activeScreenRecorder.fileName,
+						webcamFileName:
+							activeWebcamRecorder && webcamWritten ? activeWebcamRecorder.fileName : undefined,
 						createdAt: activeRecordingId,
 						cameraMarkers: [...cameraMarkers.current],
 						durationMs: duration,
@@ -482,7 +495,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 
 					if (!health.usable) {
 						console.warn(
-							`Webcam opened but produced no image (${health.reason}). Reacquiring the device...`,
+							`Webcam opened but produced no usable video (${health.reason}). Reacquiring the device...`,
 						);
 						webcamStream.current.getTracks().forEach((track) => track.stop());
 						// Give the driver a moment to settle before the second attempt —
@@ -502,10 +515,44 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 						);
 					}
 
+					const negotiatedWidth = webcamSettings?.width;
+					const negotiatedHeight = webcamSettings?.height;
+					if (negotiatedWidth && negotiatedHeight) {
+						const negotiated: WebcamResolution = {
+							label:
+								webcamStream.current.getVideoTracks()[0]?.label ?? webcamSettings?.deviceId ?? "",
+							width: negotiatedWidth,
+							height: negotiatedHeight,
+						};
+						setWebcamResolution(negotiated);
+						saveUserPreferences({ webcamLastResolution: negotiated });
+						// A camera quietly handing back less than was asked for is the
+						// difference between a 1080p take and a 720p one, and there is no
+						// other point in the flow where you would notice.
+						if (negotiatedHeight < WEBCAM_TARGET_HEIGHT) {
+							toast.warning(
+								t("recording.webcamBelowTarget", {
+									width: String(negotiatedWidth),
+									height: String(negotiatedHeight),
+									targetWidth: String(WEBCAM_TARGET_WIDTH),
+									targetHeight: String(WEBCAM_TARGET_HEIGHT),
+								}),
+								{ duration: 8000 },
+							);
+						}
+					}
+
 					if (!health.usable) {
 						// Let the recording proceed — the screen capture is still good, and
 						// stopping here would lose the take entirely. But say so loudly.
-						toast.error(t("recording.webcamNoImage"), { duration: 10000 });
+						toast.error(
+							t(
+								health.reason === "frozen-frames"
+									? "recording.webcamFrozen"
+									: "recording.webcamNoImage",
+							),
+							{ duration: 12000 },
+						);
 					}
 				} catch (cameraError) {
 					console.warn("Failed to get webcam access:", cameraError);
@@ -568,7 +615,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			height = Math.floor(height / CODEC_ALIGNMENT) * CODEC_ALIGNMENT;
 
 			const videoBitsPerSecond = computeBitrate(width, height);
-			const mimeType = selectMimeType();
+			const mimeType = selectRecordingMimeType();
 
 			console.log(
 				`Recording at ${width}x${height} @ ${frameRate ?? TARGET_FRAME_RATE}fps using ${mimeType} / ${Math.round(
@@ -577,13 +624,20 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			);
 
 			const hasAudio = stream.current.getAudioTracks().length > 0;
-			screenRecorder.current = createRecorderHandle(stream.current, {
-				mimeType,
-				videoBitsPerSecond,
-				...(hasAudio
-					? { audioBitsPerSecond: systemAudioTrack ? AUDIO_BITRATE_SYSTEM : AUDIO_BITRATE_VOICE }
-					: {}),
-			});
+			// The id names the files, so it has to exist before the recorders open them.
+			recordingId.current = Date.now();
+			const baseName = `${RECORDING_FILE_PREFIX}${recordingId.current}`;
+			screenRecorder.current = createRecorderHandle(
+				stream.current,
+				{
+					mimeType,
+					videoBitsPerSecond,
+					...(hasAudio
+						? { audioBitsPerSecond: systemAudioTrack ? AUDIO_BITRATE_SYSTEM : AUDIO_BITRATE_VOICE }
+						: {}),
+				},
+				`${baseName}${VIDEO_FILE_EXTENSION}`,
+			);
 			screenRecorder.current.recorder.addEventListener(
 				"error",
 				() => {
@@ -593,13 +647,16 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			);
 
 			if (webcamStream.current) {
-				webcamRecorder.current = createRecorderHandle(webcamStream.current, {
-					mimeType,
-					videoBitsPerSecond: Math.min(videoBitsPerSecond, BITRATE_BASE),
-				});
+				webcamRecorder.current = createRecorderHandle(
+					webcamStream.current,
+					{
+						mimeType,
+						videoBitsPerSecond: Math.min(videoBitsPerSecond, BITRATE_BASE),
+					},
+					`${baseName}${WEBCAM_FILE_SUFFIX}${VIDEO_FILE_EXTENSION}`,
+				);
 			}
 
-			recordingId.current = Date.now();
 			accumulatedDurationMs.current = 0;
 			segmentStartedAt.current = Date.now();
 			allowAutoFinalize.current = true;
@@ -822,6 +879,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 		microphoneDeviceId,
 		setMicrophoneDeviceId,
 		webcamDeviceId,
+		webcamResolution,
 		setWebcamDeviceId,
 		systemAudioEnabled,
 		setSystemAudioEnabled,

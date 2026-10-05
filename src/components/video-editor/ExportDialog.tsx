@@ -1,6 +1,7 @@
-import { Download, Loader2, X } from "lucide-react";
+import { Download, Loader2, Video, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { useScopedT } from "@/contexts/I18nContext";
 import type { ExportProgress } from "@/lib/exporter";
 
@@ -14,6 +15,8 @@ interface ExportDialogProps {
 	exportFormat?: "mp4" | "gif";
 	exportedFilePath?: string;
 	onShowInFolder?: () => void;
+	onRecordAgain?: () => void;
+	isOpeningRecorder?: boolean;
 }
 
 export function ExportDialog({
@@ -26,8 +29,12 @@ export function ExportDialog({
 	exportFormat = "mp4",
 	exportedFilePath,
 	onShowInFolder,
+	onRecordAgain,
+	isOpeningRecorder = false,
 }: ExportDialogProps) {
 	const t = useScopedT("dialogs");
+	const te = useScopedT("editor");
+	const tc = useScopedT("common");
 	const [showSuccess, setShowSuccess] = useState(false);
 
 	// Reset showSuccess when a new export starts or dialog reopens
@@ -89,12 +96,22 @@ export function ExportDialog({
 	};
 
 	return (
-		<>
-			<div
-				className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 animate-in fade-in duration-200"
-				onClick={isExporting ? undefined : onClose}
-			/>
-			<div className="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-[60] bg-[#09090b] rounded-2xl shadow-2xl border border-white/10 p-8 w-[90vw] max-w-md animate-in zoom-in-95 duration-200">
+		<Dialog
+			open={isOpen}
+			onOpenChange={(open) => {
+				if (!open && !isExporting) onClose();
+			}}
+		>
+			<DialogContent
+				showCloseButton={false}
+				onEscapeKeyDown={(event) => {
+					if (isExporting) event.preventDefault();
+				}}
+				onPointerDownOutside={(event) => {
+					if (isExporting) event.preventDefault();
+				}}
+				className="block bg-[#09090b] rounded-2xl border-white/10 p-8 w-[90vw] max-w-md max-h-[90vh] overflow-y-auto"
+			>
 				<div className="flex items-center justify-between mb-6">
 					<div className="flex items-center gap-4">
 						{showSuccess ? (
@@ -103,12 +120,12 @@ export function ExportDialog({
 									<Download className="w-6 h-6 text-[#34B27B]" />
 								</div>
 								<div className="flex flex-col gap-2">
-									<span className="text-xl font-bold text-slate-200 block">
+									<DialogTitle className="text-xl font-bold text-slate-200 block">
 										{t("export.complete")}
-									</span>
-									<span className="text-sm text-slate-400">
+									</DialogTitle>
+									<DialogDescription className="text-sm text-slate-400">
 										{t("export.yourFormatReady", { format: formatLabel.toLowerCase() })}
-									</span>
+									</DialogDescription>
 									{exportedFilePath && (
 										<Button
 											variant="secondary"
@@ -137,8 +154,12 @@ export function ExportDialog({
 									</div>
 								)}
 								<div>
-									<span className="text-xl font-bold text-slate-200 block">{getTitle()}</span>
-									<span className="text-sm text-slate-400">{getStatusMessage()}</span>
+									<DialogTitle className="text-xl font-bold text-slate-200 block">
+										{getTitle()}
+									</DialogTitle>
+									<DialogDescription className="text-sm text-slate-400">
+										{getStatusMessage()}
+									</DialogDescription>
 								</div>
 							</>
 						)}
@@ -148,6 +169,7 @@ export function ExportDialog({
 							variant="ghost"
 							size="icon"
 							onClick={onClose}
+							aria-label={tc("actions.close")}
 							className="hover:bg-white/10 text-slate-400 hover:text-white rounded-full"
 						>
 							<X className="w-5 h-5" />
@@ -190,7 +212,20 @@ export function ExportDialog({
 									)}
 								</span>
 							</div>
-							<div className="h-2 bg-white/5 rounded-full overflow-hidden border border-white/5">
+							<div
+								role="progressbar"
+								aria-label={
+									isCompiling || isFinalizing ? t("export.compiling") : t("export.renderingFrames")
+								}
+								aria-valuemin={0}
+								aria-valuemax={100}
+								aria-valuenow={
+									isCompiling || isFinalizing
+										? renderProgress || undefined
+										: Math.min(progress.percentage, 100)
+								}
+								className="h-2 bg-white/5 rounded-full overflow-hidden border border-white/5"
+							>
 								{isCompiling || isFinalizing ? (
 									// Show render progress if available, otherwise animated indeterminate bar
 									renderProgress !== undefined && renderProgress > 0 ? (
@@ -245,17 +280,34 @@ export function ExportDialog({
 								</div>
 							</div>
 						</div>
-
-						{onCancel && (
-							<div className="pt-2">
+					</div>
+				)}
+				{isExporting && (
+					<div className="mt-6 space-y-3">
+						{onRecordAgain && (
+							<>
 								<Button
-									onClick={onCancel}
-									variant="destructive"
-									className="w-full py-6 bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 hover:border-red-500/30 transition-all rounded-xl"
+									onClick={onRecordAgain}
+									disabled={isOpeningRecorder}
+									aria-busy={isOpeningRecorder}
+									className="w-full h-12 bg-[#34B27B] text-[#09090b] hover:bg-[#34B27B]/90 rounded-xl"
 								>
-									{t("export.cancelExport")}
+									<Video className="w-4 h-4" />
+									{te("newRecording.recordAgain")}
 								</Button>
-							</div>
+								<p className="text-xs text-slate-400 text-center">
+									{te("newRecording.exportContinues")}
+								</p>
+							</>
+						)}
+						{onCancel && (
+							<Button
+								onClick={onCancel}
+								variant="destructive"
+								className="w-full h-12 bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 rounded-xl"
+							>
+								{t("export.cancelExport")}
+							</Button>
 						)}
 					</div>
 				)}
@@ -267,7 +319,7 @@ export function ExportDialog({
 						</p>
 					</div>
 				)}
-			</div>
-		</>
+			</DialogContent>
+		</Dialog>
 	);
 }

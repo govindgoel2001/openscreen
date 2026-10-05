@@ -31,6 +31,7 @@
 		"defaultSourceName": "Pantalla"
 	},
 	"recording": {
+		"start": "Iniciar grabación",
 		"selectSource": "Por favor selecciona una fuente para grabar"
 	},
 	"language": "Idioma"

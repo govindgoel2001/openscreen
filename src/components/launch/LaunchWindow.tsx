@@ -79,6 +79,7 @@ const windowBtnClasses =
 
 export function LaunchWindow() {
 	const t = useScopedT("launch");
+	const tc = useScopedT("common");
 	const { locale, setLocale } = useI18n();
 	const [isMac, setIsMac] = useState(false);
 
@@ -105,6 +106,7 @@ export function LaunchWindow() {
 		setWebcamEnabled,
 		webcamDeviceId,
 		setWebcamDeviceId,
+		webcamResolution,
 	} = useScreenRecorder();
 
 	const showMicControls = microphoneEnabled && !recording;
@@ -142,6 +144,21 @@ export function LaunchWindow() {
 				? t("webcam.noneFound")
 				: cameraDevices.find((d) => d.deviceId === (webcamDeviceId || selectedCameraId))?.label ||
 					t("webcam.defaultCamera");
+
+	// The camera resolution is only knowable once a stream is open, so this shows
+	// what the selected camera handed over last time. It is the difference between
+	// noticing a 720p take before recording and noticing it in the edit.
+	const selectedCameraDeviceId = webcamDeviceId || selectedCameraId;
+	const webcamQualityBadge = (() => {
+		if (!webcamResolution) return null;
+		const selected = cameraDevices.find((d) => d.deviceId === selectedCameraDeviceId);
+		if (!selected || selected.label !== webcamResolution.label) return null;
+		return {
+			text: `${webcamResolution.height}p`,
+			belowTarget: webcamResolution.height < 1080,
+			title: `${webcamResolution.width}x${webcamResolution.height}`,
+		};
+	})();
 
 	const { level } = useAudioLevelMeter({
 		enabled: showMicControls,
@@ -377,6 +394,18 @@ export function LaunchWindow() {
 									</select>
 								)}
 							</div>
+							{webcamQualityBadge && (
+								<span
+									className={`shrink-0 text-[9px] font-mono px-1.5 py-0.5 rounded ${
+										webcamQualityBadge.belowTarget
+											? "bg-amber-500/20 text-amber-300"
+											: "bg-white/10 text-white/50"
+									}`}
+									title={webcamQualityBadge.title}
+								>
+									{webcamQualityBadge.text}
+								</span>
+							)}
 						</div>
 					)}
 				</div>
@@ -449,6 +478,7 @@ export function LaunchWindow() {
 							: "bg-white/5 hover:bg-white/[0.08]"
 					}`}
 					onClick={toggleRecording}
+					aria-label={recording ? tc("actions.stopRecording") : t("recording.start")}
 					disabled={!hasSelectedSource && !recording}
 					style={{ flex: "0 0 auto" }}
 				>

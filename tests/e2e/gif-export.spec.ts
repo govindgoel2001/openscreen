@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { _electron as electron, expect, test } from "@playwright/test";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -10,12 +10,20 @@ const MAIN_JS = path.join(ROOT, "dist-electron/main.js");
 const TEST_VIDEO = path.join(__dirname, "../fixtures/sample.webm");
 
 test("exports a GIF from a loaded video", async () => {
-	const outputPath = path.join(os.tmpdir(), `test-gif-export-${Date.now()}.gif`);
-	let testVideoInRecordings = "";
+	const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), "openscreen-gif-export-"));
+	const safeCleanupPath = path.dirname(path.resolve(testRoot)) === path.resolve(os.tmpdir());
+	const outputPath = path.join(testRoot, "export.gif");
+	const userDataDir = path.join(testRoot, "user-data");
+	fs.mkdirSync(userDataDir);
+	const harnessPath = path.join(testRoot, "launch.cjs");
+	fs.writeFileSync(
+		harnessPath,
+		`const { app } = require("electron");\napp.setPath("userData", ${JSON.stringify(userDataDir)});\nimport(${JSON.stringify(pathToFileURL(MAIN_JS).href)});\n`,
+	);
 
 	const app = await electron.launch({
 		args: [
-			MAIN_JS,
+			harnessPath,
 			// Required in CI sandbox environments (GitHub Actions, Docker, etc.)
 			"--no-sandbox",
 			// Force software WebGL in headless CI to avoid GPU framebuffer errors.
@@ -63,30 +71,23 @@ test("exports a GIF from a loaded video", async () => {
 
 		// Copy the test fixture into the app's recordings directory so it passes
 		// the path security check in set-current-video-path.
-		const userDataDir = await app.evaluate(({ app: electronApp }) => {
-			return electronApp.getPath("userData");
-		});
 		const recordingsDir = path.join(userDataDir, "recordings");
-		testVideoInRecordings = path.join(recordingsDir, "test-sample.webm");
+		const testVideoInRecordings = path.join(recordingsDir, "test-sample.webm");
 		fs.mkdirSync(recordingsDir, { recursive: true });
 		fs.copyFileSync(TEST_VIDEO, testVideoInRecordings);
 
-		try {
-			await hudWindow.evaluate((videoPath: string) => {
-				window.electronAPI.setCurrentVideoPath(videoPath);
-				window.electronAPI.switchToEditor();
-			}, testVideoInRecordings);
-		} catch {
-			// Expected: switchToEditor() closes the HUD window, terminating
-			// the Playwright page context before evaluate() can resolve.
-		}
-
-		// ── 3. Switch to the editor window. This closes the HUD and opens
-		//       a new BrowserWindow with ?windowType=editor.
-		const editorWindow = await app.waitForEvent("window", {
+		// Register the listener before opening the editor, and load the media
+		// before that editor binds its session. The recorder stays available.
+		const editorWindowPromise = app.waitForEvent("window", {
 			predicate: (w) => w.url().includes("windowType=editor"),
 			timeout: 15_000,
 		});
+		await hudWindow.evaluate(async (videoPath: string) => {
+			const result = await window.electronAPI.setCurrentVideoPath(videoPath);
+			if (!result.success) throw new Error("Could not load test video");
+			await window.electronAPI.switchToEditor();
+		}, testVideoInRecordings);
+		const editorWindow = await editorWindowPromise;
 
 		// WebCodecs (VideoEncoder) may not be registered in the renderer on first
 		// load of a second BrowserWindow. A single reload ensures the feature is
@@ -126,12 +127,14 @@ test("exports a GIF from a loaded video", async () => {
 		const stats = fs.statSync(outputPath);
 		expect(stats.size).toBeGreaterThan(1024); // at least 1 KB
 	} finally {
+		await app
+			.evaluate(({ BrowserWindow }) => {
+				for (const win of BrowserWindow.getAllWindows()) win.destroy();
+			})
+			.catch(() => {
+				// The isolated test app may already have exited.
+			});
 		await app.close();
-		if (fs.existsSync(outputPath)) {
-			fs.unlinkSync(outputPath);
-		}
-		if (testVideoInRecordings && fs.existsSync(testVideoInRecordings)) {
-			fs.unlinkSync(testVideoInRecordings);
-		}
+		if (safeCleanupPath) fs.rmSync(testRoot, { recursive: true, force: true });
 	}
 });

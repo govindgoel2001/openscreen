@@ -1,4 +1,13 @@
 {
+	"newRecording": {
+		"title": "返回录制器",
+		"recordAgain": "再次录制",
+		"exportContinues": "导出将在后台继续处理。",
+		"failed": "无法打开录制器，请重试。",
+		"description": "当前会话已保存。",
+		"cancel": "取消",
+		"confirm": "确认"
+	},
 	"errors": {
 		"noVideoLoaded": "未加载视频",
 		"videoNotReady": "视频未就绪",
@@ -30,6 +39,10 @@
 		"systemAudioUnavailable": "系统音频不可用。将在无系统音频的情况下录制。",
 		"microphoneDenied": "麦克风权限被拒绝。录制将继续，但不包含音频。",
 		"cameraDenied": "摄像头权限被拒绝。录制将继续，但不包含摄像头画面。",
-		"permissionDenied": "录屏权限被拒绝。请允许屏幕录制。"
+		"permissionDenied": "录屏权限被拒绝。请允许屏幕录制。",
+		"cameraModeUnavailable": "{{accelerators}} 已被其他应用占用。你仍可以在编辑器中设置摄像头模式。",
+		"webcamNoImage": "摄像头已打开但画面为空白。请确认 GoPro Webcam 应用显示实时预览，然后重新开始录制。",
+		"webcamFrozen": "摄像头输出的是 GoPro 静态画面，而不是实时视频。请在相机上将「连接 > USB 连接」设为 GoPro Connect，确认防火墙没有拦截 GoPro USB 网络设备，然后重启 GoPro Webcam 应用。",
+		"webcamBelowTarget": "摄像头正在输出 {{width}}x{{height}}，低于请求的 {{targetWidth}}x{{targetHeight}}。请检查是否选择了正确的摄像头。"
 	}
 }

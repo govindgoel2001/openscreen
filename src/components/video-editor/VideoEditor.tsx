@@ -3,14 +3,6 @@ import { FolderOpen, Languages, Save, Video } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { toast } from "sonner";
-import {
-	Dialog,
-	DialogContent,
-	DialogDescription,
-	DialogFooter,
-	DialogHeader,
-	DialogTitle,
-} from "@/components/ui/dialog";
 import { useI18n, useScopedT } from "@/contexts/I18nContext";
 import { useShortcuts } from "@/contexts/ShortcutsContext";
 import { INITIAL_EDITOR_STATE, useEditorHistory } from "@/hooks/useEditorHistory";
@@ -31,7 +23,12 @@ import {
 import { computeFrameStepTime } from "@/lib/frameStep";
 import type { ProjectMedia } from "@/lib/recordingSession";
 import { matchesShortcut } from "@/lib/shortcuts";
-import { loadUserPreferences, saveUserPreferences } from "@/lib/userPreferences";
+import {
+	getWebcamOffsetMs,
+	loadUserPreferences,
+	saveUserPreferences,
+	saveWebcamOffsetMs,
+} from "@/lib/userPreferences";
 import {
 	getAspectRatioValue,
 	getNativeAspectRatioValue,
@@ -143,9 +140,13 @@ export default function VideoEditor() {
 	const [exportProgress, setExportProgress] = useState<ExportProgress | null>(null);
 	const [exportError, setExportError] = useState<string | null>(null);
 	const [showExportDialog, setShowExportDialog] = useState(false);
-	const [showNewRecordingDialog, setShowNewRecordingDialog] = useState(false);
+	const [openingRecorder, setOpeningRecorder] = useState(false);
+	const openingRecorderRef = useRef(false);
 	const [exportQuality, setExportQuality] = useState<ExportQuality>("good");
 	const [exportFormat, setExportFormat] = useState<ExportFormat>("mp4");
+	// The camera the offset belongs to. Null when nothing has recorded yet, in
+	// which case the last-used offset stands in.
+	const [webcamDeviceId, setWebcamDeviceId] = useState<string | null>(null);
 	const [gifFrameRate, setGifFrameRate] = useState<GifFrameRate>(15);
 	const [gifLoop, setGifLoop] = useState(true);
 	const [gifSizePreset, setGifSizePreset] = useState<GifSizePreset>("medium");
@@ -404,24 +405,28 @@ export default function VideoEditor() {
 		updateState({
 			padding: prefs.padding,
 			aspectRatio: prefs.aspectRatio,
-			webcamOffsetMs: prefs.webcamOffsetMs,
+			webcamOffsetMs: getWebcamOffsetMs(prefs.webcamDeviceId, prefs),
 		});
 		setExportQuality(prefs.exportQuality);
 		setExportFormat(prefs.exportFormat);
+		setWebcamDeviceId(prefs.webcamDeviceId);
 		setPrefsHydrated(true);
 	}, [updateState]);
 
 	// Auto-save user preferences when settings change
 	useEffect(() => {
 		if (!prefsHydrated) return;
-		saveUserPreferences({
-			padding,
-			aspectRatio,
-			exportQuality,
-			exportFormat,
-			webcamOffsetMs,
-		});
-	}, [prefsHydrated, padding, aspectRatio, exportQuality, exportFormat, webcamOffsetMs]);
+		saveUserPreferences({ padding, aspectRatio, exportQuality, exportFormat });
+		saveWebcamOffsetMs(webcamDeviceId, webcamOffsetMs);
+	}, [
+		prefsHydrated,
+		padding,
+		aspectRatio,
+		exportQuality,
+		exportFormat,
+		webcamOffsetMs,
+		webcamDeviceId,
+	]);
 
 	const saveProject = useCallback(
 		async (forceSaveAs: boolean) => {
@@ -535,15 +540,21 @@ export default function VideoEditor() {
 		await saveProject(true);
 	}, [saveProject]);
 
-	const handleNewRecordingConfirm = useCallback(async () => {
-		const result = await window.electronAPI.startNewRecording();
-		if (result.success) {
-			setShowNewRecordingDialog(false);
-		} else {
-			console.error("Failed to start new recording:", result.error);
-			setError("Failed to start new recording: " + (result.error || "Unknown error"));
+	const handleReturnToRecorder = useCallback(async () => {
+		if (openingRecorderRef.current) return;
+		openingRecorderRef.current = true;
+		setOpeningRecorder(true);
+		try {
+			const result = await window.electronAPI.startNewRecording();
+			if (!result.success) toast.error(t("newRecording.failed"));
+		} catch (error) {
+			console.error("Failed to open recorder:", error);
+			toast.error(t("newRecording.failed"));
+		} finally {
+			openingRecorderRef.current = false;
+			setOpeningRecorder(false);
 		}
-	}, []);
+	}, [t]);
 
 	const handleLoadProject = useCallback(async () => {
 		const result = await window.electronAPI.loadProjectFile();
@@ -1572,34 +1583,6 @@ export default function VideoEditor() {
 
 	return (
 		<div className="flex flex-col h-screen bg-[#09090b] text-slate-200 overflow-hidden selection:bg-[#34B27B]/30">
-			<Dialog open={showNewRecordingDialog} onOpenChange={setShowNewRecordingDialog}>
-				<DialogContent
-					className="sm:max-w-[425px]"
-					style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
-				>
-					<DialogHeader>
-						<DialogTitle>{t("newRecording.title")}</DialogTitle>
-						<DialogDescription>{t("newRecording.description")}</DialogDescription>
-					</DialogHeader>
-					<DialogFooter>
-						<button
-							type="button"
-							onClick={() => setShowNewRecordingDialog(false)}
-							className="px-4 py-2 rounded-md bg-white/10 text-white hover:bg-white/20 text-sm font-medium transition-colors"
-						>
-							{t("newRecording.cancel")}
-						</button>
-						<button
-							type="button"
-							onClick={handleNewRecordingConfirm}
-							className="px-4 py-2 rounded-md bg-[#34B27B] text-white hover:bg-[#34B27B]/90 text-sm font-medium transition-colors"
-						>
-							{t("newRecording.confirm")}
-						</button>
-					</DialogFooter>
-				</DialogContent>
-			</Dialog>
-
 			<div
 				className="h-10 flex-shrink-0 bg-[#09090b]/80 backdrop-blur-md border-b border-white/5 flex items-center justify-between px-6 z-50"
 				style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
@@ -1627,7 +1610,9 @@ export default function VideoEditor() {
 					</div>
 					<button
 						type="button"
-						onClick={() => setShowNewRecordingDialog(true)}
+						onClick={handleReturnToRecorder}
+						disabled={openingRecorder}
+						aria-busy={openingRecorder}
 						className="flex items-center gap-1 px-2 py-1 rounded-md text-white/50 hover:text-white/90 hover:bg-white/10 transition-all duration-150 text-[11px] font-medium"
 					>
 						<Video size={14} />
@@ -1839,7 +1824,11 @@ export default function VideoEditor() {
 						hasWebcam={Boolean(webcamVideoPath)}
 						webcamOffsetMs={webcamOffsetMs}
 						onWebcamOffsetChange={(offsetMs) => updateState({ webcamOffsetMs: offsetMs })}
-						onWebcamOffsetCommit={() => pushState({ webcamOffsetMs })}
+						onWebcamOffsetCommit={() => {
+							// Remembered against this camera, so the next take with it starts synced.
+							saveWebcamOffsetMs(webcamDeviceId, webcamOffsetMs);
+							pushState({ webcamOffsetMs });
+						}}
 						webcamLayoutPreset={webcamLayoutPreset}
 						onWebcamLayoutPresetChange={(preset) =>
 							pushState({
@@ -1900,6 +1889,8 @@ export default function VideoEditor() {
 				onClose={() => setShowExportDialog(false)}
 				progress={exportProgress}
 				isExporting={isExporting}
+				onRecordAgain={handleReturnToRecorder}
+				isOpeningRecorder={openingRecorder}
 				error={exportError}
 				onCancel={handleCancelExport}
 				exportFormat={exportFormat}

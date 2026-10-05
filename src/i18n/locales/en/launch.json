@@ -31,6 +31,7 @@
 		"defaultSourceName": "Screen"
 	},
 	"recording": {
+		"start": "Start recording",
 		"selectSource": "Please select a source to record"
 	},
 	"language": "Language"

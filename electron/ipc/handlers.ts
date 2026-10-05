@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import type { FileHandle } from "node:fs/promises";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -13,6 +15,7 @@ import {
 	systemPreferences,
 } from "electron";
 import {
+	type FinalizeLiveSessionInput,
 	normalizeProjectMedia,
 	normalizeRecordingSession,
 	type ProjectMedia,
@@ -169,8 +172,24 @@ type SelectedSource = {
 };
 
 let selectedSource: SelectedSource | null = null;
-let currentProjectPath: string | null = null;
-let currentRecordingSession: RecordingSession | null = null;
+interface EditorSessionState {
+	currentProjectPath: string | null;
+	currentRecordingSession: RecordingSession | null;
+}
+
+const pendingEditorSession: EditorSessionState = {
+	currentProjectPath: null,
+	currentRecordingSession: null,
+};
+const editorSessions = new WeakMap<Electron.WebContents, EditorSessionState>();
+
+export function bindEditorSession(contents: Electron.WebContents) {
+	editorSessions.set(contents, { ...pendingEditorSession });
+}
+
+function getEditorSession(contents: Electron.WebContents): EditorSessionState {
+	return editorSessions.get(contents) ?? pendingEditorSession;
+}
 
 function normalizePath(filePath: string) {
 	return path.resolve(filePath);
@@ -197,15 +216,18 @@ function normalizeVideoSourcePath(videoPath?: string | null): string | null {
 	return trimmed;
 }
 
-function isTrustedProjectPath(filePath?: string | null) {
-	if (!filePath || !currentProjectPath) {
+function isTrustedProjectPath(filePath: string | null | undefined, state: EditorSessionState) {
+	if (!filePath || !state.currentProjectPath) {
 		return false;
 	}
-	return normalizePath(filePath) === normalizePath(currentProjectPath);
+	return normalizePath(filePath) === normalizePath(state.currentProjectPath);
 }
 
-function setCurrentRecordingSessionState(session: RecordingSession | null) {
-	currentRecordingSession = session;
+function setCurrentRecordingSessionState(
+	session: RecordingSession | null,
+	state: EditorSessionState = pendingEditorSession,
+) {
+	state.currentRecordingSession = session;
 }
 
 function getSessionManifestPathForVideo(videoPath: string) {
@@ -256,10 +278,6 @@ async function loadRecordedSessionForVideoPath(
 }
 
 async function storeRecordedSessionFiles(payload: StoreRecordedSessionInput) {
-	const createdAt =
-		typeof payload.createdAt === "number" && Number.isFinite(payload.createdAt)
-			? payload.createdAt
-			: Date.now();
 	const screenVideoPath = resolveRecordingOutputPath(payload.screen.fileName);
 	await fs.writeFile(screenVideoPath, Buffer.from(payload.screen.videoData));
 
@@ -269,11 +287,136 @@ async function storeRecordedSessionFiles(payload: StoreRecordedSessionInput) {
 		await fs.writeFile(webcamVideoPath, Buffer.from(payload.webcam.videoData));
 	}
 
+	return writeRecordedSessionSidecars(screenVideoPath, webcamVideoPath, payload);
+}
+
+// Live recordings are written to disk a chunk at a time while recording, so a
+// long take never has to exist in memory. Holding a 4K take in the renderer and
+// copying it into an ArrayBuffer and across IPC on stop ran the app out of
+// memory on anything past ~20 minutes, and lost the whole take when it did.
+type LiveRecording = { handle: FileHandle; queue: Promise<void> };
+const liveRecordings = new Map<string, LiveRecording>();
+
+async function openLiveRecording(fileName: string) {
+	const filePath = resolveRecordingOutputPath(fileName);
+	const existing = liveRecordings.get(filePath);
+	if (existing) {
+		await existing.queue.catch(() => undefined);
+		await existing.handle.close().catch(() => undefined);
+	}
+	const handle = await fs.open(filePath, "w");
+	liveRecordings.set(filePath, { handle, queue: Promise.resolve() });
+}
+
+function appendLiveRecording(fileName: string, data: ArrayBuffer) {
+	const filePath = resolveRecordingOutputPath(fileName);
+	const live = liveRecordings.get(filePath);
+	if (!live) {
+		return Promise.reject(new Error(`No live recording open for ${fileName}`));
+	}
+	// Chained so chunks land in the order the recorder produced them, even
+	// though each IPC call is handled asynchronously.
+	live.queue = live.queue.then(async () => {
+		await live.handle.write(Buffer.from(data));
+	});
+	return live.queue;
+}
+
+async function closeLiveRecording(fileName: string) {
+	const filePath = resolveRecordingOutputPath(fileName);
+	const live = liveRecordings.get(filePath);
+	if (!live) {
+		return filePath;
+	}
+	liveRecordings.delete(filePath);
+	await live.queue.catch(() => undefined);
+	await live.handle.sync().catch(() => undefined);
+	await live.handle.close();
+	return filePath;
+}
+
+// MediaRecorder output has no duration and no seek index, and the editor can't
+// open a file without a duration. A stream copy through ffmpeg writes both
+// without touching the picture. The muxer is forced to matroska because the
+// recorder often picks H.264, which ffmpeg's webm muxer refuses; Chromium plays
+// matroska with H.264 under a .webm name, which is what the recorder wrote anyway.
+function remuxInPlace(filePath: string) {
+	const tmpPath = `${filePath}.remux.webm`;
+	return new Promise<void>((resolve) => {
+		const proc = spawn(
+			"ffmpeg",
+			[
+				"-hide_banner",
+				"-loglevel",
+				"error",
+				"-y",
+				"-i",
+				filePath,
+				"-map",
+				"0",
+				"-c",
+				"copy",
+				"-f",
+				"matroska",
+				tmpPath,
+			],
+			{ windowsHide: true },
+		);
+		let stderr = "";
+		proc.stderr?.on("data", (chunk) => {
+			stderr += String(chunk);
+		});
+		proc.on("error", (error) => {
+			console.error("ffmpeg not available to finalize recording:", error);
+			resolve();
+		});
+		proc.on("close", async (code) => {
+			if (code !== 0) {
+				console.error(`ffmpeg remux failed (${code}):`, stderr.slice(-2000));
+			}
+			if (code === 0) {
+				await fs.rename(tmpPath, filePath).catch(() => undefined);
+			}
+			await fs.rm(tmpPath, { force: true }).catch(() => undefined);
+			resolve();
+		});
+	});
+}
+
+async function finalizeLiveSession(payload: FinalizeLiveSessionInput) {
+	const screenVideoPath = await closeLiveRecording(payload.screenFileName);
+	const webcamVideoPath = payload.webcamFileName
+		? await closeLiveRecording(payload.webcamFileName)
+		: undefined;
+
+	await remuxInPlace(screenVideoPath);
+	if (webcamVideoPath) {
+		await remuxInPlace(webcamVideoPath);
+	}
+
+	return writeRecordedSessionSidecars(screenVideoPath, webcamVideoPath, payload);
+}
+
+async function discardLiveRecording(fileName: string) {
+	const filePath = await closeLiveRecording(fileName);
+	await fs.rm(filePath, { force: true });
+}
+
+async function writeRecordedSessionSidecars(
+	screenVideoPath: string,
+	webcamVideoPath: string | undefined,
+	payload: Pick<StoreRecordedSessionInput, "createdAt" | "cameraMarkers" | "durationMs">,
+) {
+	const createdAt =
+		typeof payload.createdAt === "number" && Number.isFinite(payload.createdAt)
+			? payload.createdAt
+			: Date.now();
+
 	const session: RecordingSession = webcamVideoPath
 		? { screenVideoPath, webcamVideoPath, createdAt }
 		: { screenVideoPath, createdAt };
 	setCurrentRecordingSessionState(session);
-	currentProjectPath = null;
+	pendingEditorSession.currentProjectPath = null;
 
 	const telemetryPath = `${screenVideoPath}.cursor.json`;
 	if (pendingCursorSamples.length > 0) {
@@ -312,7 +455,7 @@ async function storeRecordedSessionFiles(payload: StoreRecordedSessionInput) {
 
 	const sessionManifestPath = path.join(
 		RECORDINGS_DIR,
-		`${path.parse(payload.screen.fileName).name}${RECORDING_SESSION_SUFFIX}`,
+		`${path.parse(screenVideoPath).name}${RECORDING_SESSION_SUFFIX}`,
 	);
 	await fs.writeFile(sessionManifestPath, JSON.stringify(session, null, 2), "utf-8");
 
@@ -428,19 +571,17 @@ function sampleCursorPoint() {
 export function registerIpcHandlers(
 	createEditorWindow: () => void,
 	createSourceSelectorWindow: () => BrowserWindow,
-	getMainWindow: () => BrowserWindow | null,
 	getSourceSelectorWindow: () => BrowserWindow | null,
 	onRecordingStateChange?: (recording: boolean, sourceName: string) => void,
-	switchToHud?: () => void,
+	switchToHud?: (editorWindow?: BrowserWindow | null) => void,
 ) {
-	ipcMain.handle("switch-to-hud", () => {
-		if (switchToHud) switchToHud();
+	ipcMain.handle("switch-to-hud", (event) => {
+		if (switchToHud) switchToHud(BrowserWindow.fromWebContents(event.sender));
 	});
-	ipcMain.handle("start-new-recording", async () => {
+	ipcMain.handle("start-new-recording", async (event) => {
 		try {
-			setCurrentRecordingSessionState(null);
 			if (switchToHud) {
-				switchToHud();
+				switchToHud(BrowserWindow.fromWebContents(event.sender));
 			}
 			return { success: true };
 		} catch (error) {
@@ -515,10 +656,6 @@ export function registerIpcHandlers(
 	});
 
 	ipcMain.handle("switch-to-editor", () => {
-		const mainWin = getMainWindow();
-		if (mainWin) {
-			mainWin.close();
-		}
 		createEditorWindow();
 	});
 
@@ -532,6 +669,49 @@ export function registerIpcHandlers(
 				message: "Failed to store recording session",
 				error: String(error),
 			};
+		}
+	});
+
+	ipcMain.handle("open-live-recording", async (_, fileName: string) => {
+		try {
+			await openLiveRecording(fileName);
+			return { success: true };
+		} catch (error) {
+			console.error("Failed to open live recording:", error);
+			return { success: false, error: String(error) };
+		}
+	});
+
+	ipcMain.handle("append-live-recording", async (_, fileName: string, data: ArrayBuffer) => {
+		try {
+			await appendLiveRecording(fileName, data);
+			return { success: true };
+		} catch (error) {
+			console.error("Failed to write live recording chunk:", error);
+			return { success: false, error: String(error) };
+		}
+	});
+
+	ipcMain.handle("finalize-live-session", async (_, payload: FinalizeLiveSessionInput) => {
+		try {
+			return await finalizeLiveSession(payload);
+		} catch (error) {
+			console.error("Failed to finalize live recording:", error);
+			return {
+				success: false,
+				message: "Failed to finalize live recording",
+				error: String(error),
+			};
+		}
+	});
+
+	ipcMain.handle("discard-live-recording", async (_, fileName: string) => {
+		try {
+			await discardLiveRecording(fileName);
+			return { success: true };
+		} catch (error) {
+			console.error("Failed to discard live recording:", error);
+			return { success: false, error: String(error) };
 		}
 	});
 
@@ -551,8 +731,9 @@ export function registerIpcHandlers(
 		}
 	});
 
-	ipcMain.handle("get-recorded-video-path", async () => {
+	ipcMain.handle("get-recorded-video-path", async (event) => {
 		try {
+			const { currentRecordingSession } = getEditorSession(event.sender);
 			if (currentRecordingSession?.screenVideoPath) {
 				return { success: true, path: currentRecordingSession.screenVideoPath };
 			}
@@ -638,14 +819,14 @@ export function registerIpcHandlers(
 		}
 	});
 
-	ipcMain.handle("get-camera-markers", async (_, videoPath?: string) => {
+	ipcMain.handle("get-camera-markers", async (event, videoPath?: string) => {
 		const empty = {
 			success: true,
 			markers: [] as Array<{ timeMs: number; mode: string }>,
 			durationMs: 0,
 		};
 		const targetVideoPath = normalizeVideoSourcePath(
-			videoPath ?? currentRecordingSession?.screenVideoPath,
+			videoPath ?? getEditorSession(event.sender).currentRecordingSession?.screenVideoPath,
 		);
 		if (!targetVideoPath) {
 			return empty;
@@ -702,9 +883,9 @@ export function registerIpcHandlers(
 		}
 	});
 
-	ipcMain.handle("get-cursor-telemetry", async (_, videoPath?: string) => {
+	ipcMain.handle("get-cursor-telemetry", async (event, videoPath?: string) => {
 		const targetVideoPath = normalizeVideoSourcePath(
-			videoPath ?? currentRecordingSession?.screenVideoPath,
+			videoPath ?? getEditorSession(event.sender).currentRecordingSession?.screenVideoPath,
 		);
 		if (!targetVideoPath) {
 			return { success: true, samples: [] };
@@ -832,7 +1013,7 @@ export function registerIpcHandlers(
 		}
 	});
 
-	ipcMain.handle("open-video-file-picker", async () => {
+	ipcMain.handle("open-video-file-picker", async (event) => {
 		try {
 			const result = await dialog.showOpenDialog({
 				title: mainT("dialogs", "fileDialogs.selectVideo"),
@@ -858,7 +1039,7 @@ export function registerIpcHandlers(
 					message: "Selected file is not a supported video",
 				};
 			}
-			currentProjectPath = null;
+			getEditorSession(event.sender).currentProjectPath = null;
 			return {
 				success: true,
 				path: approvedPath,
@@ -899,9 +1080,10 @@ export function registerIpcHandlers(
 
 	ipcMain.handle(
 		"save-project-file",
-		async (_, projectData: unknown, suggestedName?: string, existingProjectPath?: string) => {
+		async (event, projectData: unknown, suggestedName?: string, existingProjectPath?: string) => {
 			try {
-				const trustedExistingProjectPath = isTrustedProjectPath(existingProjectPath)
+				const state = getEditorSession(event.sender);
+				const trustedExistingProjectPath = isTrustedProjectPath(existingProjectPath, state)
 					? existingProjectPath
 					: null;
 
@@ -911,7 +1093,7 @@ export function registerIpcHandlers(
 						JSON.stringify(projectData, null, 2),
 						"utf-8",
 					);
-					currentProjectPath = trustedExistingProjectPath;
+					state.currentProjectPath = trustedExistingProjectPath;
 					return {
 						success: true,
 						path: trustedExistingProjectPath,
@@ -946,7 +1128,7 @@ export function registerIpcHandlers(
 				}
 
 				await fs.writeFile(result.filePath, JSON.stringify(projectData, null, 2), "utf-8");
-				currentProjectPath = result.filePath;
+				state.currentProjectPath = result.filePath;
 
 				return {
 					success: true,
@@ -964,7 +1146,7 @@ export function registerIpcHandlers(
 		},
 	);
 
-	ipcMain.handle("load-project-file", async () => {
+	ipcMain.handle("load-project-file", async (event) => {
 		try {
 			const result = await dialog.showOpenDialog({
 				title: mainT("dialogs", "fileDialogs.openProject"),
@@ -988,8 +1170,9 @@ export function registerIpcHandlers(
 			const content = await fs.readFile(filePath, "utf-8");
 			const project = JSON.parse(content);
 			const session = await getApprovedProjectSession(project, filePath);
-			currentProjectPath = filePath;
-			setCurrentRecordingSessionState(session);
+			const state = getEditorSession(event.sender);
+			state.currentProjectPath = filePath;
+			setCurrentRecordingSessionState(session, state);
 
 			return {
 				success: true,
@@ -1006,8 +1189,10 @@ export function registerIpcHandlers(
 		}
 	});
 
-	ipcMain.handle("load-current-project-file", async () => {
+	ipcMain.handle("load-current-project-file", async (event) => {
 		try {
+			const state = getEditorSession(event.sender);
+			const { currentProjectPath } = state;
 			if (!currentProjectPath) {
 				return { success: false, message: "No active project" };
 			}
@@ -1015,7 +1200,7 @@ export function registerIpcHandlers(
 			const content = await fs.readFile(currentProjectPath, "utf-8");
 			const project = JSON.parse(content);
 			const session = await getApprovedProjectSession(project, currentProjectPath);
-			setCurrentRecordingSessionState(session);
+			setCurrentRecordingSessionState(session, state);
 			return {
 				success: true,
 				path: currentProjectPath,
@@ -1030,20 +1215,23 @@ export function registerIpcHandlers(
 			};
 		}
 	});
-	ipcMain.handle("set-current-recording-session", (_, session: RecordingSession | null) => {
+	ipcMain.handle("set-current-recording-session", (event, session: RecordingSession | null) => {
+		const state = getEditorSession(event.sender);
 		const normalized = normalizeRecordingSession(session);
-		setCurrentRecordingSessionState(normalized);
-		currentProjectPath = null;
+		setCurrentRecordingSessionState(normalized, state);
+		state.currentProjectPath = null;
 		return { success: true, session: normalized ?? undefined };
 	});
 
-	ipcMain.handle("get-current-recording-session", () => {
+	ipcMain.handle("get-current-recording-session", (event) => {
+		const { currentRecordingSession } = getEditorSession(event.sender);
 		return currentRecordingSession
 			? { success: true, session: currentRecordingSession }
 			: { success: false };
 	});
 
-	ipcMain.handle("set-current-video-path", async (_, path: string) => {
+	ipcMain.handle("set-current-video-path", async (event, path: string) => {
+		const state = getEditorSession(event.sender);
 		const normalizedPath = normalizeVideoSourcePath(path);
 		if (!normalizedPath || !isPathAllowed(normalizedPath)) {
 			return { success: false, message: "Video path has not been approved" };
@@ -1056,25 +1244,26 @@ export function registerIpcHandlers(
 			if (restoredSession.webcamVideoPath) {
 				approveFilePath(restoredSession.webcamVideoPath);
 			}
-			setCurrentRecordingSessionState(restoredSession);
+			setCurrentRecordingSessionState(restoredSession, state);
 		} else {
-			setCurrentRecordingSessionState({
-				screenVideoPath: normalizedPath,
-				createdAt: Date.now(),
-			});
+			setCurrentRecordingSessionState(
+				{ screenVideoPath: normalizedPath, createdAt: Date.now() },
+				state,
+			);
 		}
-		currentProjectPath = null;
+		state.currentProjectPath = null;
 		return { success: true };
 	});
 
-	ipcMain.handle("get-current-video-path", () => {
+	ipcMain.handle("get-current-video-path", (event) => {
+		const { currentRecordingSession } = getEditorSession(event.sender);
 		return currentRecordingSession?.screenVideoPath
 			? { success: true, path: currentRecordingSession.screenVideoPath }
 			: { success: false };
 	});
 
-	ipcMain.handle("clear-current-video-path", () => {
-		setCurrentRecordingSessionState(null);
+	ipcMain.handle("clear-current-video-path", (event) => {
+		setCurrentRecordingSessionState(null, getEditorSession(event.sender));
 		return { success: true };
 	});
 

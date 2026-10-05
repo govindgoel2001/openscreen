@@ -31,6 +31,7 @@
 		"defaultSourceName": "屏幕"
 	},
 	"recording": {
+		"start": "开始录制",
 		"selectSource": "请选择要录制的源"
 	},
 	"language": "语言"

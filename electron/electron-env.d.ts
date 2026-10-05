@@ -57,6 +57,21 @@ interface Window {
 			message?: string;
 			error?: string;
 		}>;
+		openLiveRecording: (fileName: string) => Promise<{ success: boolean; error?: string }>;
+		appendLiveRecording: (
+			fileName: string,
+			data: ArrayBuffer,
+		) => Promise<{ success: boolean; error?: string }>;
+		finalizeLiveSession: (
+			payload: import("../src/lib/recordingSession").FinalizeLiveSessionInput,
+		) => Promise<{
+			success: boolean;
+			path?: string;
+			session?: import("../src/lib/recordingSession").RecordingSession;
+			message?: string;
+			error?: string;
+		}>;
+		discardLiveRecording: (fileName: string) => Promise<{ success: boolean; error?: string }>;
 		getRecordedVideoPath: () => Promise<{
 			success: boolean;
 			path?: string;

@@ -22,6 +22,15 @@ export interface StoreRecordedSessionInput {
 	durationMs?: number;
 }
 
+/** A recording that was streamed to disk while it ran, closed out on stop. */
+export interface FinalizeLiveSessionInput {
+	screenFileName: string;
+	webcamFileName?: string;
+	createdAt?: number;
+	cameraMarkers?: StoreRecordedSessionInput["cameraMarkers"];
+	durationMs?: number;
+}
+
 function normalizePath(value: unknown): string | undefined {
 	if (typeof value !== "string") {
 		return undefined;

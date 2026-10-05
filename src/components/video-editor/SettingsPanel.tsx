@@ -948,8 +948,11 @@ export function SettingsPanel({
 								</div>
 							</div>
 
-							{/* USB virtual cameras deliver frames late, so the webcam file
-							    lags the screen recording even though both started together. */}
+							{/* Virtual cameras deliver frames late, so the webcam file lags the
+							    screen recording even though both started together. The delay
+							    cannot be read from the stream: a frame is timestamped when it
+							    reaches the browser, which is already after the driver's delay.
+							    So it is set here and remembered against this camera. */}
 							<div className="p-2 rounded-lg bg-white/5 border border-white/5">
 								<div className="flex items-center justify-between mb-1">
 									<div className="text-[10px] font-medium text-slate-300">Webcam sync</div>
@@ -966,8 +969,10 @@ export function SettingsPanel({
 									step={10}
 									className="w-full [&_[role=slider]]:bg-[#34B27B] [&_[role=slider]]:border-[#34B27B] [&_[role=slider]]:h-3 [&_[role=slider]]:w-3"
 								/>
-								<div className="mt-1 text-[9px] leading-tight text-slate-500">
-									Raise until your lips match your voice.
+								<div className="mt-1">
+									<span className="text-[9px] leading-tight text-slate-500">
+										Raise until your lips match your voice. Remembered for this camera.
+									</span>
 								</div>
 							</div>
 

@@ -3,19 +3,22 @@
 
 import commonEn from "../src/i18n/locales/en/common.json";
 import dialogsEn from "../src/i18n/locales/en/dialogs.json";
+import editorEn from "../src/i18n/locales/en/editor.json";
 import commonEs from "../src/i18n/locales/es/common.json";
 import dialogsEs from "../src/i18n/locales/es/dialogs.json";
+import editorEs from "../src/i18n/locales/es/editor.json";
 import commonZh from "../src/i18n/locales/zh-CN/common.json";
 import dialogsZh from "../src/i18n/locales/zh-CN/dialogs.json";
+import editorZh from "../src/i18n/locales/zh-CN/editor.json";
 
 type Locale = "en" | "zh-CN" | "es";
-type Namespace = "common" | "dialogs";
+type Namespace = "common" | "dialogs" | "editor";
 type MessageMap = Record<string, unknown>;
 
 const messages: Record<Locale, Record<Namespace, MessageMap>> = {
-	en: { common: commonEn, dialogs: dialogsEn },
-	"zh-CN": { common: commonZh, dialogs: dialogsZh },
-	es: { common: commonEs, dialogs: dialogsEs },
+	en: { common: commonEn, dialogs: dialogsEn, editor: editorEn },
+	"zh-CN": { common: commonZh, dialogs: dialogsZh, editor: editorZh },
+	es: { common: commonEs, dialogs: dialogsEs, editor: editorEs },
 };
 
 let currentLocale: Locale = "en";

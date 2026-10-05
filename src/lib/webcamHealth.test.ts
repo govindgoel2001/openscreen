@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isFrameBlank } from "./webcamHealth";
+import { framesAreIdentical, isFrameBlank } from "./webcamHealth";
 
 function solidFrame(value: number, pixelCount = 64): Uint8ClampedArray {
 	const data = new Uint8ClampedArray(pixelCount * 4);
@@ -58,5 +58,36 @@ describe("isFrameBlank", () => {
 		const data = solidFrame(255);
 		data[0] = 253;
 		expect(isFrameBlank(data)).toBe(true);
+	});
+});
+
+describe("framesAreIdentical", () => {
+	it("matches a frame against a byte-for-byte copy, which is what a still image gives", () => {
+		const frame = noisyFrame();
+		expect(framesAreIdentical(frame, new Uint8ClampedArray(frame))).toBe(true);
+	});
+
+	it("separates frames that differ by a single level, which is what sensor noise gives", () => {
+		const frame = noisyFrame();
+		const jittered = new Uint8ClampedArray(frame);
+		jittered[4] = jittered[4] === 255 ? 254 : jittered[4] + 1;
+		expect(framesAreIdentical(frame, jittered)).toBe(false);
+	});
+
+	it("ignores the alpha channel", () => {
+		const frame = noisyFrame();
+		const transparent = new Uint8ClampedArray(frame);
+		for (let index = 3; index < transparent.length; index += 4) {
+			transparent[index] = 0;
+		}
+		expect(framesAreIdentical(frame, transparent)).toBe(true);
+	});
+
+	it("treats different-sized frames as different", () => {
+		expect(framesAreIdentical(noisyFrame(64), noisyFrame(32))).toBe(false);
+	});
+
+	it("does not call a solid frame identical to a different solid frame", () => {
+		expect(framesAreIdentical(solidFrame(255), solidFrame(254))).toBe(false);
 	});
 });
